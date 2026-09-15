@@ -1,0 +1,5 @@
+---
+# Master playbook - runs full configuration in order.
+- import_playbook: 01_base_setup.yml
+- import_playbook: 02_nginx_app.yml
+- import_playbook: 03_logrotate.yml

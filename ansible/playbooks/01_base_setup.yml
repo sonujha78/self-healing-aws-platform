@@ -1,0 +1,58 @@
+---
+# Dedicated non-root user for running the application + SSH hardening.
+- name: Base host setup - app user and SSH hardening
+  hosts: self_healing_nodes
+  become: true
+  vars:
+    app_user: appsvc
+
+  tasks:
+    - name: Create dedicated non-root application user
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        shell: /usr/sbin/nologin
+        system: true
+        create_home: true
+        home: /opt/app
+
+    - name: Ensure app directory is owned by app user
+      ansible.builtin.file:
+        path: /opt/app
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    - name: Harden SSH - disable root login
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+      notify: Restart sshd
+
+    - name: Harden SSH - disable password authentication (key-only)
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+      notify: Restart sshd
+
+    - name: Harden SSH - restrict authorized_keys location and perms
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?AuthorizedKeysFile'
+        line: 'AuthorizedKeysFile .ssh/authorized_keys'
+      notify: Restart sshd
+
+    - name: Ensure ubuntu user's authorized_keys has correct permissions
+      ansible.builtin.file:
+        path: /home/ubuntu/.ssh/authorized_keys
+        owner: ubuntu
+        group: ubuntu
+        mode: "0600"
+
+  handlers:
+    - name: Restart sshd
+      ansible.builtin.service:
+        name: ssh
+        state: restarted

@@ -1,0 +1,16 @@
+[Unit]
+Description=Sample Health App (self-healing platform)
+After=network.target
+
+[Service]
+Type=simple
+User={{ app_user }}
+WorkingDirectory=/opt/app
+ExecStart=/opt/app/venv/bin/python3 /opt/app/health_app.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/healthapp/app.log
+StandardError=append:/var/log/healthapp/app.log
+
+[Install]
+WantedBy=multi-user.target

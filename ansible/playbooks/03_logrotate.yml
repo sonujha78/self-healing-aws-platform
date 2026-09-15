@@ -1,0 +1,19 @@
+---
+- name: Configure log rotation for the app
+  hosts: self_healing_nodes
+  become: true
+  vars:
+    app_user: appsvc
+
+  tasks:
+    - name: Deploy logrotate config for health app
+      ansible.builtin.template:
+        src: templates/healthapp_logrotate.j2
+        dest: /etc/logrotate.d/healthapp
+        mode: "0644"
+
+    - name: Validate logrotate config
+      ansible.builtin.command:
+        cmd: logrotate -d /etc/logrotate.d/healthapp
+      register: logrotate_check
+      changed_when: false

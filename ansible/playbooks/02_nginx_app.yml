@@ -1,0 +1,95 @@
+---
+# Installs nginx + deploys a small sample Flask app exposing /health,
+# run under the dedicated non-root user, managed by systemd.
+- name: Install nginx and sample health app
+  hosts: self_healing_nodes
+  become: true
+  vars:
+    app_user: appsvc
+
+  tasks:
+    - name: Install nginx, python3-venv, pip
+      ansible.builtin.apt:
+        name:
+          - nginx
+          - python3-venv
+          - python3-pip
+        state: present
+        update_cache: true
+
+    - name: Create log directory for app
+      ansible.builtin.file:
+        path: /var/log/healthapp
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    - name: Create Python venv for the app
+      ansible.builtin.command:
+        cmd: python3 -m venv /opt/app/venv
+        creates: /opt/app/venv/bin/python3
+
+    - name: Install Flask into app venv
+      ansible.builtin.pip:
+        name: flask
+        virtualenv: /opt/app/venv
+
+    - name: Deploy health app code
+      ansible.builtin.copy:
+        src: files/health_app.py
+        dest: /opt/app/health_app.py
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+
+    - name: Fix ownership of app directory
+      ansible.builtin.file:
+        path: /opt/app
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        recurse: true
+
+    - name: Deploy systemd unit for health app
+      ansible.builtin.template:
+        src: templates/healthapp.service.j2
+        dest: /etc/systemd/system/healthapp.service
+        mode: "0644"
+      notify: Reload systemd and restart healthapp
+
+    - name: Enable and start health app service
+      ansible.builtin.systemd:
+        name: healthapp
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Configure nginx as reverse proxy to health app
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/default
+        content: |
+          server {
+              listen 80 default_server;
+              location /health {
+                  proxy_pass http://127.0.0.1:8080/health;
+              }
+              location / {
+                  return 200 'self-healing-platform node OK\n';
+                  add_header Content-Type text/plain;
+              }
+          }
+        mode: "0644"
+      notify: Restart nginx
+
+  handlers:
+    - name: Reload systemd and restart healthapp
+      ansible.builtin.systemd:
+        name: healthapp
+        state: restarted
+        daemon_reload: true
+
+    - name: Restart nginx
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
