@@ -1,0 +1,15 @@
+[Unit]
+Description=Self-Healing AWS Infrastructure Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=sonu
+WorkingDirectory=/home/sonu/self-healing-aws-platform
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/home/sonu/self-healing-aws-platform/.venv/bin/python3 -m daemon.main
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

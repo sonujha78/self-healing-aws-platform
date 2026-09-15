@@ -1,0 +1,13 @@
+/var/log/self-healing-daemon/*.log {
+    daily
+    missingok
+    rotate 7
+    compress
+    delaycompress
+    notifempty
+    create 0644 sonu sonu
+    sharedscripts
+    postrotate
+        systemctl kill -s HUP self-healing-daemon.service >/dev/null 2>&1 || true
+    endscript
+}
