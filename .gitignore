@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# AWS / secrets
+*.pem
+*.key
+.env
+aws_config.json
+credentials
+
+# Ansible
+*.retry
+ansible/inventory/*.ini
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
