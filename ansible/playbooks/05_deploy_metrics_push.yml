@@ -1,0 +1,37 @@
+---
+- name: Deploy custom CloudWatch metric push script
+  hosts: self_healing_nodes
+  become: true
+  vars:
+    app_user: appsvc
+
+  tasks:
+    - name: Create monitoring directory
+      ansible.builtin.file:
+        path: /opt/app/monitoring
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    - name: Deploy push_custom_metric.py
+      ansible.builtin.copy:
+        src: ../../monitoring/push_custom_metric.py
+        dest: /opt/app/monitoring/push_custom_metric.py
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    - name: Install boto3 and requests into app venv
+      ansible.builtin.pip:
+        name:
+          - boto3
+          - requests
+        virtualenv: /opt/app/venv
+
+    - name: Schedule metric push via cron (every 2 minutes)
+      ansible.builtin.cron:
+        name: "push app_health_score to CloudWatch"
+        user: "{{ app_user }}"
+        minute: "*/2"
+        job: "/opt/app/venv/bin/python3 /opt/app/monitoring/push_custom_metric.py >> /var/log/healthapp/metric_push.log 2>&1"
