@@ -1,0 +1,28 @@
+---
+- name: Test custom health_check module against deployed app
+  hosts: self_healing_nodes
+  become: false
+  gather_facts: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+
+  tasks:
+    - name: Run custom health_check module
+      health_check:
+        url: "http://{{ ansible_host }}/health"
+        timeout: 5
+        expected_status: 200
+        required_fields:
+          - status
+          - hostname
+          - uptime_seconds
+      register: health_result
+
+    - name: Show structured health result
+      ansible.builtin.debug:
+        var: health_result
+
+    - name: Fail play if instance is unhealthy
+      ansible.builtin.fail:
+        msg: "Instance {{ inventory_hostname }} is unhealthy: {{ health_result.reason }}"
+      when: not health_result.healthy
