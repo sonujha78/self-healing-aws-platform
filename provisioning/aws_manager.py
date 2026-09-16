@@ -260,7 +260,6 @@ class AWSManager:
         profile_name = self.ensure_metric_push_role()
         new_ids = []
         for i in range(to_create):
-            name = f"{config.INSTANCE_NAME_PREFIX}-{len(existing) + i + 1}"
             resp = self.client.run_instances(
                 ImageId=ami_id,
                 InstanceType=self.instance_type,
@@ -269,12 +268,17 @@ class AWSManager:
                 MaxCount=1,
                 SubnetId=subnet_id,
                 SecurityGroupIds=[sg_id],
-                TagSpecifications=_tag_spec("instance", name),
+                TagSpecifications=_tag_spec("instance", "pending-rename"),
                 IamInstanceProfile={"Name": profile_name},
             )
             iid = resp["Instances"][0]["InstanceId"]
+            unique_name = f"{config.INSTANCE_NAME_PREFIX}-{iid[-8:]}"
+            self.client.create_tags(
+                Resources=[iid],
+                Tags=[{"Key": "Name", "Value": unique_name}],
+            )
             new_ids.append(iid)
-            logger.info("Launched instance %s (%s)", iid, name)
+            logger.info("Launched instance %s (%s)", iid, unique_name)
 
         self.client.get_waiter("instance_running").wait(InstanceIds=new_ids)
         return [i["InstanceId"] for i in existing] + new_ids
