@@ -46,6 +46,11 @@ SSH_READY_TIMEOUT_SECONDS = 180 # max time to wait for new instance to be SSH-re
 ANSIBLE_DIR = "/home/sonu/self-healing-aws-platform/ansible"
 ANSIBLE_PLAYBOOK = "playbooks/site.yml"
 SSH_KEY_NAME = "self-healing-key"
+VENV_BIN = "/home/sonu/self-healing-aws-platform/.venv/bin"
+ANSIBLE_PLAYBOOK_BIN = "ansible-playbook"  # resolved via PATH (system-installed), but PATH is
+                                            # rewritten below so the child inventory script's
+                                            # "#!/usr/bin/env python3" resolves to the venv's
+                                            # python3, which has boto3 installed.
 
 
 class InstanceHealth:
@@ -226,12 +231,17 @@ class SelfHealingDaemon:
     def reconfigure_with_ansible(self):
         self._log_event("info", "Re-running Ansible configuration", action="ansible_start")
         try:
+            import os
+            env = os.environ.copy()
+            env["PATH"] = f"{VENV_BIN}:{env.get('PATH', '')}"
+
             result = subprocess.run(
-                ["ansible-playbook", ANSIBLE_PLAYBOOK],
+                [ANSIBLE_PLAYBOOK_BIN, ANSIBLE_PLAYBOOK],
                 cwd=ANSIBLE_DIR,
                 capture_output=True,
                 text=True,
                 timeout=600,
+                env=env,
             )
             if result.returncode == 0:
                 self._log_event(
