@@ -29,6 +29,12 @@
           - requests
         virtualenv: /opt/app/venv
 
+    - name: Run metric push once immediately (so a datapoint exists right away)
+      ansible.builtin.command:
+        cmd: /opt/app/venv/bin/python3 /opt/app/monitoring/push_custom_metric.py
+      become_user: "{{ app_user }}"
+      changed_when: true
+
     - name: Schedule metric push via cron (every 2 minutes)
       ansible.builtin.cron:
         name: "push app_health_score to CloudWatch"

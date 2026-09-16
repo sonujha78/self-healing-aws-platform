@@ -30,8 +30,60 @@ class AWSManager:
         self.dry_run = dry_run
         self.ec2 = boto3.resource("ec2", region_name=self.region)
         self.client = boto3.client("ec2", region_name=self.region)
+        self.iam = boto3.client("iam", region_name=self.region)
         self.instance_type = config.get_instance_type_for_region(self.region)
         config.validate_instance_type(self.instance_type)
+
+    METRIC_ROLE_NAME = "self-healing-metric-push-role"
+    METRIC_PROFILE_NAME = "self-healing-metric-push-profile"
+
+    def ensure_metric_push_role(self):
+        """Idempotent: creates (or reuses) an IAM role + instance profile
+        so instances can call cloudwatch:PutMetricData without static keys."""
+        import json, time as _time
+
+        trust_policy = {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"Service": "ec2.amazonaws.com"},
+                "Action": "sts:AssumeRole",
+            }],
+        }
+
+        try:
+            self.iam.get_role(RoleName=self.METRIC_ROLE_NAME)
+        except self.iam.exceptions.NoSuchEntityException:
+            self.iam.create_role(
+                RoleName=self.METRIC_ROLE_NAME,
+                AssumeRolePolicyDocument=json.dumps(trust_policy),
+            )
+            self.iam.put_role_policy(
+                RoleName=self.METRIC_ROLE_NAME,
+                PolicyName="cloudwatch-put-metric-only",
+                PolicyDocument=json.dumps({
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Action": "cloudwatch:PutMetricData",
+                        "Resource": "*",
+                    }],
+                }),
+            )
+            logger.info("Created IAM role %s", self.METRIC_ROLE_NAME)
+
+        try:
+            self.iam.get_instance_profile(InstanceProfileName=self.METRIC_PROFILE_NAME)
+        except self.iam.exceptions.NoSuchEntityException:
+            self.iam.create_instance_profile(InstanceProfileName=self.METRIC_PROFILE_NAME)
+            self.iam.add_role_to_instance_profile(
+                InstanceProfileName=self.METRIC_PROFILE_NAME,
+                RoleName=self.METRIC_ROLE_NAME,
+            )
+            logger.info("Created instance profile %s, waiting for propagation", self.METRIC_PROFILE_NAME)
+            _time.sleep(10)
+
+        return self.METRIC_PROFILE_NAME
 
     # ---------------- lookup helpers (idempotency) ----------------
 
@@ -205,6 +257,7 @@ class AWSManager:
             return [f"dry-run-instance-{i}" for i in range(to_create)]
 
         ami_id = self._latest_ubuntu_ami()
+        profile_name = self.ensure_metric_push_role()
         new_ids = []
         for i in range(to_create):
             name = f"{config.INSTANCE_NAME_PREFIX}-{len(existing) + i + 1}"
@@ -217,6 +270,7 @@ class AWSManager:
                 SubnetId=subnet_id,
                 SecurityGroupIds=[sg_id],
                 TagSpecifications=_tag_spec("instance", name),
+                IamInstanceProfile={"Name": profile_name},
             )
             iid = resp["Instances"][0]["InstanceId"]
             new_ids.append(iid)

@@ -1,5 +1,6 @@
 ---
-# Master playbook - runs full configuration in order.
+# Master playbook - runs full configuration in order, including metrics.
 - import_playbook: 01_base_setup.yml
 - import_playbook: 02_nginx_app.yml
 - import_playbook: 03_logrotate.yml
+- import_playbook: 05_deploy_metrics_push.yml

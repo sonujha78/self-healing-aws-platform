@@ -5,14 +5,22 @@ For each running project instance:
   - Checks EC2 status checks (CloudWatch/EC2) + the custom app_health_score
     metric (Part C).
   - Tracks consecutive failures per instance in memory.
-  - If an instance fails N consecutive checks:
+  - Skips instances that are still within their warm-up grace period
+    (AWS EC2 status checks typically take 2-3 minutes to first report
+    "ok" after launch - checking too early causes false-positive failures).
+  - If an instance fails N consecutive checks AFTER its grace period:
       1. Terminate it via boto3.
       2. Provision a replacement by importing Part A's AWSManager directly
          (not a copy-pasted script).
-      3. Re-run Ansible configuration against the new instance via subprocess.
-      4. Log every action with timestamp + reason, locally AND to CloudWatch Logs.
+      3. WAIT until the replacement has a public IP and is reachable on
+         port 22 (SSH) - AWS has a short propagation lag before a newly
+         "running" instance's public IP is assigned/reachable, and running
+         Ansible before that silently configures zero hosts.
+      4. Re-run Ansible configuration against the new instance via subprocess.
+      5. Log every action with timestamp + reason, locally AND to CloudWatch Logs.
 """
 
+import socket
 import subprocess
 import logging
 import time
@@ -32,6 +40,8 @@ METRIC_NAME = "app_health_score"
 FAILURE_THRESHOLD = 3          # N consecutive failed checks before healing
 CHECK_INTERVAL_SECONDS = 30
 METRIC_LOOKBACK_MINUTES = 5
+WARMUP_GRACE_SECONDS = 300      # skip health checks for this long after launch
+SSH_READY_TIMEOUT_SECONDS = 180 # max time to wait for new instance to be SSH-reachable
 
 ANSIBLE_DIR = "/home/sonu/self-healing-aws-platform/ansible"
 ANSIBLE_PLAYBOOK = "playbooks/site.yml"
@@ -98,8 +108,16 @@ class SelfHealingDaemon:
         for r in resp["Reservations"]:
             for i in r["Instances"]:
                 name = next((t["Value"] for t in i.get("Tags", []) if t["Key"] == "Name"), i["InstanceId"])
-                instances.append({"id": i["InstanceId"], "name": name})
+                instances.append({
+                    "id": i["InstanceId"],
+                    "name": name,
+                    "launch_time": i["LaunchTime"],
+                })
         return instances
+
+    def is_within_warmup(self, launch_time) -> bool:
+        age = datetime.now(timezone.utc) - launch_time
+        return age < timedelta(seconds=WARMUP_GRACE_SECONDS)
 
     def get_ec2_status_ok(self, instance_id) -> bool:
         resp = self.ec2.describe_instance_status(InstanceIds=[instance_id])
@@ -126,8 +144,6 @@ class SelfHealingDaemon:
         )
         datapoints = sorted(resp["Datapoints"], key=lambda d: d["Timestamp"])
         if not datapoints:
-            # No recent datapoint = treat as unknown/unhealthy (app may be down
-            # or not reporting - either way, don't assume healthy).
             return 0.0
         return datapoints[-1]["Average"]
 
@@ -158,8 +174,7 @@ class SelfHealingDaemon:
             "info", "Instance terminated", instance_id=instance_id, action="terminate_complete",
         )
 
-    def provision_replacement(self) -> str:
-        """Reuses Part A's AWSManager as an imported library, not a copy-pasted script."""
+    def provision_replacement(self) -> list:
         manager = AWSManager(region=self.region)
         result = manager.provision_all(key_name=SSH_KEY_NAME)
         new_ids = result["instance_ids"]
@@ -168,6 +183,45 @@ class SelfHealingDaemon:
             action="provision_complete",
         )
         return new_ids
+
+    def wait_for_instances_sshable(self, instance_ids):
+        """
+        Waits until every instance has a public IP AND port 22 is accepting
+        connections. Prevents running Ansible before AWS has finished
+        propagating the public IP / before sshd is up - which otherwise
+        causes the dynamic inventory to silently skip the host.
+        """
+        self._log_event("info", "Waiting for replacement instance(s) to become SSH-reachable", action="wait_ssh_start")
+        deadline = time.monotonic() + SSH_READY_TIMEOUT_SECONDS
+
+        pending = set(instance_ids)
+        while pending and time.monotonic() < deadline:
+            resp = self.ec2.describe_instances(InstanceIds=list(pending))
+            for r in resp["Reservations"]:
+                for inst in r["Instances"]:
+                    iid = inst["InstanceId"]
+                    ip = inst.get("PublicIpAddress")
+                    if not ip:
+                        continue
+                    try:
+                        with socket.create_connection((ip, 22), timeout=3):
+                            pending.discard(iid)
+                            self._log_event(
+                                "info", f"Instance is SSH-reachable at {ip}",
+                                instance_id=iid, action="ssh_ready",
+                            )
+                    except OSError:
+                        pass
+            if pending:
+                time.sleep(5)
+
+        if pending:
+            self._log_event(
+                "warning", f"Timed out waiting for SSH readiness on: {pending}",
+                action="wait_ssh_timeout",
+            )
+        else:
+            self._log_event("info", "All replacement instance(s) SSH-reachable", action="wait_ssh_complete")
 
     def reconfigure_with_ansible(self):
         self._log_event("info", "Re-running Ansible configuration", action="ansible_start")
@@ -180,7 +234,11 @@ class SelfHealingDaemon:
                 timeout=600,
             )
             if result.returncode == 0:
-                self._log_event("info", "Ansible reconfiguration succeeded", action="ansible_complete")
+                self._log_event(
+                    "info",
+                    f"Ansible reconfiguration succeeded: {result.stdout[-300:]}",
+                    action="ansible_complete",
+                )
             else:
                 self._log_event(
                     "error",
@@ -197,7 +255,8 @@ class SelfHealingDaemon:
         )
         self.terminate_instance(instance_id)
         self.health.forget(instance_id)
-        self.provision_replacement()
+        new_ids = self.provision_replacement()
+        self.wait_for_instances_sshable(new_ids)
         self.reconfigure_with_ansible()
         self._log_event(
             "info", "Self-heal sequence complete", instance_id=instance_id, action="heal_complete",
@@ -211,6 +270,21 @@ class SelfHealingDaemon:
 
         for inst in instances:
             iid = inst["id"]
+
+            if self.is_within_warmup(inst["launch_time"]):
+                cycle_status[iid] = {
+                    "name": inst["name"],
+                    "healthy": None,
+                    "reason": "within warm-up grace period, skipping check",
+                    "consecutive_failures": 0,
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                }
+                self._log_event(
+                    "info", "Skipping health check - instance still warming up",
+                    instance_id=iid,
+                )
+                continue
+
             healthy, reason = self.check_instance_health(iid)
             failures = self.health.record(iid, healthy)
 
